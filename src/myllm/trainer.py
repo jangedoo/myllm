@@ -6,6 +6,8 @@ from typing import Literal
 import torch
 from tqdm.auto import tqdm
 
+from myllm.doctor import print_training_report
+
 
 def format_token_count(num_tokens: float) -> str:
     value = float(num_tokens)
@@ -433,6 +435,7 @@ class Trainer:
     def train(self, train_dl: torch.utils.data.DataLoader):
         torch.set_float32_matmul_precision("high")
 
+        print_training_report(model=self.model, trainer_config=self.config)
         self.call_callbacks("on_train_begin")
 
         self.model.train()
