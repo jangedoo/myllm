@@ -1,5 +1,6 @@
-import os
 from pathlib import Path
+
+TOKENIZER_MODEL_ID = "HuggingFaceTB/SmolLM-135M-Instruct"
 
 ROOT_DIR = Path.home() / "myllm"
 ROOT_DIR.mkdir(exist_ok=True)

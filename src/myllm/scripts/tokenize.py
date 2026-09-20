@@ -5,7 +5,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 
-TOKENIZER = "HuggingFaceTB/SmolLM-135M-Instruct"
+from myllm import config
+
 DATASET = "HuggingFaceFW/fineweb-edu"
 SUBSET = "sample-10BT"
 SPLIT = "train"
@@ -19,7 +20,7 @@ def tokenize(output_dir: str | Path, dev=False):
     final_output_dir = output_dir / ("dev" if dev else "full")
     final_output_dir.mkdir(exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(config.TOKENIZER_MODEL_ID, fast=True)
 
     ds = datasets.load_dataset(
         DATASET,
