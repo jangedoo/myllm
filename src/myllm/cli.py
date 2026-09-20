@@ -56,6 +56,7 @@ def tokenize(dev: bool = False):
 def pretrain(
     depth: int = 12,
     dev: bool = False,
+    tag: str = "latest",
     bs: int | None = None,
     seq_len: int = 1024,
     max_train_minutes: float | None = None,
@@ -82,6 +83,7 @@ def pretrain(
     launch_training(
         depth=depth,
         dev=dev,
+        tag=tag,
         micro_batch_size=bs,
         seq_len=seq_len,
         max_train_minutes=max_train_minutes,

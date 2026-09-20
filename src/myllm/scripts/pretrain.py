@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -7,7 +8,7 @@ from transformers import AutoConfig
 
 from myllm import config, data
 from myllm.scaling import compute_naive_training_mem_usage
-from myllm.trainer import Trainer, TrainingConfig
+from myllm.trainer import CheckpointCallback, MetricsCallback, Trainer, TrainingConfig
 from myllm.v1 import MyLLMV1
 
 REFERENCE_DEPTH = 12
@@ -181,8 +182,18 @@ def resolve_training_config(
     )
 
 
+def resolve_run_dir(*, dev: bool, tag: str) -> Path:
+    if not tag or Path(tag).name != tag or tag in {".", ".."}:
+        raise ValueError("tag must be a single folder name")
+
+    run_dir = config.PRETRAIN_CKPT_DIR / ("dev" if dev else "full") / tag
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def launch_training(
     depth: int = REFERENCE_DEPTH,
+    tag: str = "latest",
     seq_len: int = SEQ_LEN,
     micro_batch_size: int | None = None,
     max_train_minutes: float | None = None,
@@ -198,6 +209,7 @@ def launch_training(
     compute_dtype: torch.dtype | None = None,
     dev: bool = False,
 ):
+    run_dir = resolve_run_dir(dev=dev, tag=tag)
     tokenizer_config = AutoConfig.from_pretrained(config.TOKENIZER_MODEL_ID)
     plan = resolve_pretraining_plan(
         depth=depth,
@@ -243,4 +255,13 @@ def launch_training(
         ff_dim=plan.ff_dim,
     )
     model.cuda().compile()
-    Trainer(config=training_config, model=model).train(train_dl=train_dl)
+    trainer = Trainer(
+        config=training_config,
+        model=model,
+        callbacks=[
+            CheckpointCallback(run_dir / "checkpoints" / "checkpoint.pt"),
+            MetricsCallback(run_dir / "training_metrics.jsonl"),
+        ],
+    )
+    print(f"Artifacts are available at: {run_dir.resolve()}")
+    trainer.train(train_dl=train_dl)

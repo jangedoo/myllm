@@ -1,6 +1,8 @@
+import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -291,6 +293,7 @@ class TqdmCallback(Callback):
         loss_text = f"{loss:.4f}" if loss is not None else "--"
         self.progress_pbar.set_postfix_str(
             f"loss={loss_text}, "
+            f"step={state.current_step}, "
             f"tokens={token_progress}, "
             f"avg tokens/s={format_token_count(state.tokens_per_second)}"
         )
@@ -328,11 +331,168 @@ class StateUpdateCallback(Callback):
         state.add_tokens_processed(num_tokens)
 
 
+def save_training_metrics_dashboard(metrics_path: Path):
+    import pandas as pd
+    from lets_plot import (
+        aes,
+        geom_line,
+        gggrid,
+        ggplot,
+        ggsave,
+        ggsize,
+        labs,
+        theme,
+        theme_minimal,
+    )
+
+    metrics = pd.read_json(metrics_path, lines=True)
+    metrics = metrics.loc[metrics["split"] == "train"].copy()
+    if metrics.empty:
+        return
+
+    smoothing_window = min(20, max(1, len(metrics) // 10))
+    metrics["loss_smoothed"] = metrics["loss"].rolling(
+        smoothing_window, min_periods=1
+    ).mean()
+    metrics["tokens_per_second_k"] = metrics["tokens_per_second"] / 1_000
+    metrics["tokens_processed_m"] = metrics["tokens_processed"] / 1_000_000
+    metrics["learning_rate_micro"] = metrics["learning_rate"] * 1_000_000
+
+    common_theme = theme_minimal() + theme(
+        plot_title={"face": "bold", "size": 16},
+        axis_title={"size": 12},
+        axis_text={"size": 10},
+        panel_grid_minor="blank",
+    )
+    loss_plot = (
+        ggplot(metrics, aes(x="step"))
+        + geom_line(aes(y="loss"), color="#94a3b8", alpha=0.5, size=0.7)
+        + geom_line(aes(y="loss_smoothed"), color="#2563eb", size=1.4)
+        + labs(
+            title="Training loss",
+            subtitle=f"Raw loss and {smoothing_window}-step rolling average",
+            x="Optimizer step",
+            y="Cross-entropy loss",
+        )
+        + common_theme
+    )
+    throughput_plot = (
+        ggplot(metrics, aes(x="step", y="tokens_per_second_k"))
+        + geom_line(color="#059669", size=1.2)
+        + labs(
+            title="Average training throughput",
+            subtitle="Cumulative average since training began",
+            x="Optimizer step",
+            y="Tokens / second (thousands)",
+        )
+        + common_theme
+    )
+    tokens_plot = (
+        ggplot(metrics, aes(x="step", y="tokens_processed_m"))
+        + geom_line(color="#7c3aed", size=1.2)
+        + labs(
+            title="Total tokens consumed",
+            x="Optimizer step",
+            y="Tokens (millions)",
+        )
+        + common_theme
+    )
+    learning_rate_plot = (
+        ggplot(metrics, aes(x="step", y="learning_rate_micro"))
+        + geom_line(color="#d97706", size=1.2)
+        + labs(
+            title="Learning-rate schedule",
+            x="Optimizer step",
+            y="Learning rate (×10⁻⁶)",
+        )
+        + common_theme
+    )
+    dashboard = gggrid(
+        [loss_plot, throughput_plot, tokens_plot, learning_rate_plot],
+        ncol=2,
+        widths=[1, 1],
+        heights=[1, 1],
+        hspace=0.08,
+        vspace=0.12,
+        fit=False,
+    ) + ggsize(1400, 1000)
+
+    ggsave(
+        dashboard,
+        metrics_path.with_suffix(".html").name,
+        path=str(metrics_path.parent),
+        iframe=False,
+    )
+
+
+class MetricsCallback(Callback):
+    def __init__(self, metrics_path: Path):
+        self.metrics_path = metrics_path
+        self.metrics_file = None
+
+    def on_train_begin(self, state: TrainerState, trainer: "Trainer", **kwargs):
+        self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        self.metrics_file = self.metrics_path.open("w", encoding="utf-8")
+
+    def on_batch_end(
+        self, state: TrainerState, trainer: "Trainer", loss, num_tokens: int, **kwargs
+    ):
+        loss_value = loss.detach().item() if isinstance(loss, torch.Tensor) else loss
+        record = {
+            "split": "train",
+            "step": state.current_step,
+            "loss": float(loss_value),
+            "learning_rate": trainer.optim.param_groups[0]["lr"],
+            "num_tokens": num_tokens,
+            "tokens_processed": state.tokens_processed,
+            "elapsed_seconds": state.elapsed_sec,
+            "tokens_per_second": state.tokens_per_second,
+        }
+        self.metrics_file.write(json.dumps(record) + "\n")
+        self.metrics_file.flush()
+
+    def on_train_end(self, state: TrainerState, trainer: "Trainer", **kwargs):
+        self.metrics_file.close()
+        save_training_metrics_dashboard(self.metrics_path)
+
+
+class CheckpointCallback(Callback):
+    def __init__(self, checkpoint_path: Path):
+        self.checkpoint_path = checkpoint_path
+
+    def on_train_end(self, state: TrainerState, trainer: "Trainer", **kwargs):
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model": trainer.model.state_dict(),
+                "optimizer": trainer.optim.state_dict(),
+                "lr_scheduler": trainer.lr_scheduler.state_dict(),
+                "trainer_state": {
+                    "step": state.current_step,
+                    "tokens_processed": state.tokens_processed,
+                },
+                "training_config": asdict(trainer.config),
+            },
+            self.checkpoint_path,
+        )
+
+
+def cycle_data_loader(train_dl: torch.utils.data.DataLoader):
+    while True:
+        yielded_batch = False
+        for batch in train_dl:
+            yielded_batch = True
+            yield batch
+        if not yielded_batch:
+            raise RuntimeError("The training data loader is empty")
+
+
 class Trainer:
     def __init__(
         self,
         config: TrainingConfig | ResolvedTrainerConfig,
         model: torch.nn.Module,
+        callbacks: list[Callback] | None = None,
     ):
         self.state = TrainerState()
         if isinstance(config, TrainingConfig):
@@ -343,6 +503,7 @@ class Trainer:
         self.callbacks = [
             StateUpdateCallback(),
             TqdmCallback(),
+            *(callbacks or []),
         ]
         self.model = model
         self.optim = torch.optim.AdamW(
@@ -440,7 +601,7 @@ class Trainer:
 
         self.model.train()
 
-        train_data_iter = iter(train_dl)
+        train_data_iter = cycle_data_loader(train_dl)
 
         while not self.training_interrupt.should_stop(state=self.state):
             # start a new gradient accumulation cycle
