@@ -229,6 +229,19 @@ def training_report(model: torch.nn.Module, config: Any) -> Table:
         ("Parameter dtype(s)", ", ".join(parameter_dtypes) or "none"),
         ("Device", str(device)),
     ]
+    if hasattr(model, "nlayers") and len(getattr(model, "transformers", [])) > 0:
+        first_block = model.transformers[0]
+        rows.append(
+            (
+                "Architecture",
+                (
+                    f"{model.nlayers} layers · width "
+                    f"{model.emb_layer.embedding_dim} · "
+                    f"{first_block.mha.nheads} heads · "
+                    f"FFN {first_block.ff[0].out_features}"
+                ),
+            )
+        )
     if device.type == "cuda" and torch.cuda.is_available():
         rows.append(("Device name", torch.cuda.get_device_name(device)))
 

@@ -25,7 +25,6 @@ banner = """
 cli = typer.Typer(no_args_is_help=True, epilog=banner)
 
 data_cli = typer.Typer(no_args_is_help=True, help="Data tokenization")
-pretrain_cli = typer.Typer(no_args_is_help=True, help="Pretraining")
 sft_cli = typer.Typer(no_args_is_help=True, help="Supervised Fine Tuning")
 memory_cli = typer.Typer(
     no_args_is_help=True,
@@ -33,9 +32,16 @@ memory_cli = typer.Typer(
 )
 
 cli.add_typer(data_cli, name="data")
-cli.add_typer(pretrain_cli, name="pretrain")
 cli.add_typer(sft_cli, name="sft")
 cli.add_typer(memory_cli, name="memory")
+
+
+@cli.command()
+def doctor():
+    """Print the PyTorch, CUDA, GPU, and memory environment."""
+    from myllm.doctor import print_doctor_report
+
+    print_doctor_report()
 
 
 @data_cli.command()
@@ -46,9 +52,50 @@ def tokenize(dev: bool = False):
     tokenize(output_dir=config.PRETRAIN_DATA_DIR, dev=dev)
 
 
-@pretrain_cli.command()
-def pretrain(dev: bool = False):
-    typer.echo(f"Starting pretraining {dev=}")
+@cli.command()
+def pretrain(
+    depth: int = 12,
+    dev: bool = False,
+    bs: int | None = None,
+    seq_len: int = 1024,
+    max_train_minutes: float | None = None,
+    max_train_tokens: int | None = None,
+    max_train_steps: int | None = None,
+    grad_accum_steps: int | None = None,
+    target_tokens_per_update: int | None = None,
+    lr: float | None = None,
+    lr_schedule: Literal["constant", "cosine"] | None = None,
+    warmup_ratio: float | None = None,
+    min_lr_ratio: float | None = None,
+    max_grad_norm: float | None = None,
+    compute_dtype: Literal["bfloat16", "float16", "float32"] | None = None,
+):
+    import torch
+
+    from myllm.scripts.pretrain import launch_training
+
+    dtype = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }.get(compute_dtype)
+    launch_training(
+        depth=depth,
+        dev=dev,
+        micro_batch_size=bs,
+        seq_len=seq_len,
+        max_train_minutes=max_train_minutes,
+        max_train_tokens=max_train_tokens,
+        max_train_steps=max_train_steps,
+        grad_accum_steps=grad_accum_steps,
+        target_tokens_per_update=target_tokens_per_update,
+        lr=lr,
+        lr_schedule=lr_schedule,
+        warmup_ratio=warmup_ratio,
+        min_lr_ratio=min_lr_ratio,
+        max_grad_norm=max_grad_norm,
+        compute_dtype=dtype,
+    )
 
 
 @memory_cli.command("sweep")
