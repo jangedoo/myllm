@@ -1,5 +1,6 @@
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -8,7 +9,13 @@ from transformers import AutoConfig
 
 from myllm import config, data
 from myllm.scaling import compute_naive_training_mem_usage
-from myllm.trainer import CheckpointCallback, MetricsCallback, Trainer, TrainingConfig
+from myllm.trainer import (
+    CheckpointCallback,
+    MetricsCallback,
+    ResolvedTrainerConfig,
+    Trainer,
+    TrainingConfig,
+)
 from myllm.v1 import MyLLMV1
 
 REFERENCE_DEPTH = 12
@@ -18,7 +25,7 @@ SEQ_LEN = 1024
 TARGET_TOKENS_PER_UPDATE = 24 * (SEQ_LEN - 1) * 6
 TOKENS_PER_PARAMETER = 20
 MEMORY_HEADROOM = 0.01
-MICRO_BATCH_SIZES = (1, 2, 4, 8, 16, 24, 32)
+MICRO_BATCH_SIZES = (1, 2, 4, 8, 16, 24, 32, 64, 128)
 
 
 @dataclass(frozen=True)
@@ -186,9 +193,72 @@ def resolve_run_dir(*, dev: bool, tag: str) -> Path:
     if not tag or Path(tag).name != tag or tag in {".", ".."}:
         raise ValueError("tag must be a single folder name")
 
-    run_dir = config.PRETRAIN_CKPT_DIR / ("dev" if dev else "full") / tag
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    parent_dir = config.PRETRAIN_CKPT_DIR / ("dev" if dev else "full")
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    index = 0
+    while True:
+        folder_name = tag if index == 0 else f"{tag}-{index:03d}"
+        run_dir = parent_dir / folder_name
+        try:
+            run_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            index += 1
+        else:
+            return run_dir
+
+
+def save_run_metadata(
+    run_dir: Path,
+    *,
+    dev: bool,
+    plan: PretrainingPlan,
+    training_config: ResolvedTrainerConfig,
+    model: torch.nn.Module,
+    vocab_size: int,
+    eos_token_id: int,
+):
+    resolved_training = asdict(training_config)
+    resolved_training["compute_dtype"] = str(training_config.compute_dtype)
+    resolved_training.update(
+        effective_batch_size=training_config.effective_batch_size,
+        tokens_per_micro_batch=training_config.tokens_per_micro_batch,
+        tokens_per_update=training_config.tokens_per_update,
+        total_train_tokens=training_config.total_train_tokens,
+    )
+
+    metadata = {
+        "run": {
+            "name": run_dir.name,
+            "mode": "dev" if dev else "full",
+        },
+        "model": {
+            "class": type(model).__name__,
+            "parameters": {
+                "total": sum(parameter.numel() for parameter in model.parameters()),
+                "trainable": sum(
+                    parameter.numel()
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                ),
+            },
+            "vocab_size": vocab_size,
+            "depth": plan.depth,
+            "embed_dim": plan.embed_dim,
+            "num_heads": plan.num_heads,
+            "head_dim": plan.embed_dim // plan.num_heads,
+            "ff_dim": plan.ff_dim,
+            "rope_theta": 10_000,
+        },
+        "tokenizer": {
+            "model_id": config.TOKENIZER_MODEL_ID,
+            "eos_token_id": eos_token_id,
+        },
+        "training": resolved_training,
+    }
+    with (run_dir / "metadata.json").open("w", encoding="utf-8") as metadata_file:
+        json.dump(metadata, metadata_file, indent=2)
+        metadata_file.write("\n")
 
 
 def launch_training(
@@ -209,7 +279,6 @@ def launch_training(
     compute_dtype: torch.dtype | None = None,
     dev: bool = False,
 ):
-    run_dir = resolve_run_dir(dev=dev, tag=tag)
     tokenizer_config = AutoConfig.from_pretrained(config.TOKENIZER_MODEL_ID)
     plan = resolve_pretraining_plan(
         depth=depth,
@@ -253,6 +322,16 @@ def launch_training(
         embed_dim=plan.embed_dim,
         num_heads=plan.num_heads,
         ff_dim=plan.ff_dim,
+    )
+    run_dir = resolve_run_dir(dev=dev, tag=tag)
+    save_run_metadata(
+        run_dir,
+        dev=dev,
+        plan=plan,
+        training_config=training_config,
+        model=model,
+        vocab_size=tokenizer_config.vocab_size,
+        eos_token_id=tokenizer_config.eos_token_id,
     )
     model.cuda().compile()
     trainer = Trainer(
