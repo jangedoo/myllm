@@ -1,8 +1,26 @@
+import math
 import time
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 from tqdm.auto import tqdm
+
+
+def format_token_count(num_tokens: float) -> str:
+    value = float(num_tokens)
+    for suffix in ("", "K", "M", "B", "T"):
+        if abs(value) < 1_000 or suffix == "T":
+            if not suffix:
+                return f"{value:,.0f}"
+            if abs(value) >= 100:
+                return f"{value:.0f}{suffix}"
+            if abs(value) >= 10:
+                return f"{value:.1f}{suffix}"
+            return f"{value:.2f}{suffix}"
+        value /= 1_000
+
+    raise RuntimeError("Unreachable")
 
 
 @dataclass
@@ -26,6 +44,12 @@ class TrainerState:
     @property
     def elapsed_sec(self):
         return self.current_time - self.start_time
+
+    @property
+    def tokens_per_second(self):
+        if self.elapsed_sec <= 0:
+            return 0.0
+        return self.tokens_processed / self.elapsed_sec
 
     def update_start_time(self):
         self.start_time = time.perf_counter()
@@ -51,7 +75,7 @@ class BaseInterrupt:
 
 @dataclass
 class TimedInterrupt(BaseInterrupt):
-    max_duration_sec: int
+    max_duration_sec: float
 
     def should_stop(self, state: TrainerState, **kwargs):
         return state.elapsed_sec >= self.max_duration_sec
@@ -110,63 +134,176 @@ class Callback:
 
 @dataclass
 class TrainingConfig:
+    # data
+    micro_batch_size: int
+    seq_len: int
+
     # stopping criterias
-    max_train_minutes: int | None = None
+    max_train_minutes: float | None = None
     max_train_tokens: int | None = None
     max_train_steps: int | None = None
 
     # optimization
+    grad_accum_steps: int | None = None
     target_tokens_per_update: int | None = None
     lr: float = 1e-4
+    lr_schedule: Literal["constant", "cosine"] = "cosine"
+    warmup_ratio: float = 0.01
+    min_lr_ratio: float = 0.1
+    max_grad_norm: float | None = None
+    compute_dtype: torch.dtype = torch.bfloat16
+
+    def resolve(self) -> "ResolvedTrainerConfig":
+        return ResolvedTrainerConfig.from_training_config(self)
 
 
 @dataclass
 class ResolvedTrainerConfig:
-    max_steps: int
     micro_batch_size: int
+    seq_len: int
     grad_accum_steps: int
+
+    max_duration_sec: float | None = None
+    max_train_tokens: int | None = None
+    max_train_steps: int | None = None
+
+    lr: float = 1e-4
+    lr_schedule: Literal["constant", "cosine"] = "cosine"
+    warmup_ratio: float = 0.01
+    min_lr_ratio: float = 0.1
     max_grad_norm: float | None = None
-    compute_dtype = torch.bfloat16
+    compute_dtype: torch.dtype = torch.bfloat16
+
+    @classmethod
+    def from_training_config(cls, config: TrainingConfig):
+        stop_values = (
+            config.max_train_minutes,
+            config.max_train_tokens,
+            config.max_train_steps,
+        )
+        if sum(value is not None for value in stop_values) != 1:
+            raise ValueError(
+                "Set exactly one of max_train_minutes, max_train_tokens, or "
+                "max_train_steps"
+            )
+
+        if any(value is not None and value <= 0 for value in stop_values):
+            raise ValueError("The selected training limit must be positive")
+
+        if config.micro_batch_size <= 0 or config.seq_len <= 1:
+            raise ValueError(
+                "micro_batch_size must be positive and seq_len must exceed 1"
+            )
+
+        tokens_per_micro_batch = config.micro_batch_size * (config.seq_len - 1)
+
+        if config.grad_accum_steps is not None:
+            if config.grad_accum_steps <= 0:
+                raise ValueError("grad_accum_steps must be positive")
+            grad_accum_steps = config.grad_accum_steps
+        elif config.target_tokens_per_update is not None:
+            if config.target_tokens_per_update <= 0:
+                raise ValueError("target_tokens_per_update must be positive")
+            grad_accum_steps = math.ceil(
+                config.target_tokens_per_update / tokens_per_micro_batch
+            )
+        else:
+            raise ValueError("Set grad_accum_steps or target_tokens_per_update")
+
+        if not 0 <= config.warmup_ratio < 1:
+            raise ValueError("warmup_ratio must be in [0, 1)")
+        if not 0 <= config.min_lr_ratio <= 1:
+            raise ValueError("min_lr_ratio must be in [0, 1]")
+        if config.lr <= 0:
+            raise ValueError("lr must be positive")
+        if config.lr_schedule not in ("constant", "cosine"):
+            raise ValueError("lr_schedule must be 'constant' or 'cosine'")
+
+        tokens_per_update = tokens_per_micro_batch * grad_accum_steps
+        max_train_steps = config.max_train_steps
+        if config.max_train_tokens is not None:
+            max_train_steps = math.ceil(config.max_train_tokens / tokens_per_update)
+
+        return cls(
+            micro_batch_size=config.micro_batch_size,
+            seq_len=config.seq_len,
+            grad_accum_steps=grad_accum_steps,
+            max_duration_sec=(
+                config.max_train_minutes * 60
+                if config.max_train_minutes is not None
+                else None
+            ),
+            max_train_tokens=config.max_train_tokens,
+            max_train_steps=max_train_steps,
+            lr=config.lr,
+            lr_schedule=config.lr_schedule,
+            warmup_ratio=config.warmup_ratio,
+            min_lr_ratio=config.min_lr_ratio,
+            max_grad_norm=config.max_grad_norm,
+            compute_dtype=config.compute_dtype,
+        )
+
+    def make_interrupt(self) -> BaseInterrupt:
+        if self.max_duration_sec is not None:
+            return TimedInterrupt(max_duration_sec=self.max_duration_sec)
+        if self.max_train_tokens is not None:
+            return TokenInterrupt(max_tokens=self.max_train_tokens)
+        if self.max_train_steps is not None:
+            return StepInterrupt(max_steps=self.max_train_steps)
+        raise RuntimeError("Resolved config has no stopping criterion")
 
     @property
     def effective_batch_size(self):
         return self.micro_batch_size * self.grad_accum_steps
 
+    @property
+    def tokens_per_micro_batch(self):
+        return self.micro_batch_size * (self.seq_len - 1)
+
+    @property
+    def tokens_per_update(self):
+        return self.tokens_per_micro_batch * self.grad_accum_steps
+
+    @property
+    def total_train_tokens(self):
+        if self.max_train_tokens is not None:
+            return self.max_train_tokens
+        if self.max_train_steps is not None:
+            return self.max_train_steps * self.tokens_per_update
+        return None
+
 
 class TqdmCallback(Callback):
-    def update_progress(self, trainer: "Trainer"):
-        progress = trainer.progress
+    def update_progress(self, trainer: "Trainer", loss=None):
+        progress = round(trainer.progress, 2)
         self.progress_pbar.update(progress - self.progress_pbar.n)
+
+        state = trainer.state
+        processed = format_token_count(state.tokens_processed)
+        total = trainer.config.total_train_tokens
+        token_progress = (
+            f"{processed}/{format_token_count(total)}"
+            if total is not None
+            else processed
+        )
+        loss_text = f"{loss:.4f}" if loss is not None else "--"
+        self.progress_pbar.set_postfix_str(
+            f"loss={loss_text}, "
+            f"tokens={token_progress}, "
+            f"avg tokens/s={format_token_count(state.tokens_per_second)}"
+        )
 
     def on_train_begin(self, state: TrainerState, trainer: "Trainer", **kwargs):
         self.progress_pbar = tqdm(total=1.0, desc="Training Progress", position=0)
-        self.batch_pbar = tqdm(desc="Optimizer steps", unit="step", position=1)
-        self.micro_batch_pbar = tqdm(
-            desc="Micro Batch",
-            unit="micro batch",
-            total=trainer.config.grad_accum_steps,
-            position=2,
-            leave=False,
-        )
-
-    def on_micro_batch_end(self, state: TrainerState, trainer: "Trainer", **kwargs):
-        self.micro_batch_pbar.update(1)
         self.update_progress(trainer)
 
     def on_batch_end(
         self, state: TrainerState, trainer: "Trainer", loss, num_tokens, **kwargs
     ):
-        self.batch_pbar.update(1)
-        self.batch_pbar.set_postfix(
-            loss=f"{loss:.4f}", tokens=num_tokens, total_tokens=state.tokens_processed
-        )
-        self.micro_batch_pbar.reset(trainer.config.grad_accum_steps)
-        self.update_progress(trainer)
+        self.update_progress(trainer, loss=loss)
 
     def on_train_end(self, state: TrainerState, trainer: "Trainer", **kwargs):
         self.progress_pbar.close()
-        self.batch_pbar.close()
-        self.micro_batch_pbar.close()
 
 
 class StateUpdateCallback(Callback):
@@ -180,7 +317,6 @@ class StateUpdateCallback(Callback):
     def on_batch_end(
         self, state: TrainerState, trainer: "Trainer", loss, num_tokens: int, **kwargs
     ):
-        state.update_current_time()
         state.step_complete()
 
     def on_micro_batch_end(
@@ -191,23 +327,51 @@ class StateUpdateCallback(Callback):
 
 
 class Trainer:
-    def __init__(self, config: ResolvedTrainerConfig, model: torch.nn.Module):
+    def __init__(
+        self,
+        config: TrainingConfig | ResolvedTrainerConfig,
+        model: torch.nn.Module,
+    ):
         self.state = TrainerState()
+        if isinstance(config, TrainingConfig):
+            config = config.resolve()
         self.config = config
 
-        self.training_interrupt: BaseInterrupt = StepInterrupt(max_steps=100)
+        self.training_interrupt = self.config.make_interrupt()
         self.callbacks = [
             StateUpdateCallback(),
             TqdmCallback(),
         ]
         self.model = model
-        self.optim = torch.optim.AdamW(self.model.parameters(), lr=0.001, fused=True)
+        self.optim = torch.optim.AdamW(
+            self.model.parameters(), lr=self.config.lr, fused=True
+        )
+        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optim,
+            lr_lambda=lambda _: self._lr_multiplier(self.progress),
+        )
         self.loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
         self.loss_fn.cuda().compile()
 
     @property
     def progress(self):
         return self.training_interrupt.get_progress(state=self.state)
+
+    def _lr_multiplier(self, progress: float):
+        if self.config.lr_schedule == "constant":
+            return 1.0
+
+        if progress < self.config.warmup_ratio:
+            return progress / self.config.warmup_ratio
+
+        decay_progress = (progress - self.config.warmup_ratio) / (
+            1 - self.config.warmup_ratio
+        )
+        cosine_multiplier = 0.5 * (1 + math.cos(math.pi * decay_progress))
+        return (
+            self.config.min_lr_ratio
+            + (1 - self.config.min_lr_ratio) * cosine_multiplier
+        )
 
     def compute_loss_micro_batch(self, batch):
         token_ids = batch["token_ids"].cuda(non_blocking=True)
@@ -252,12 +416,6 @@ class Trainer:
             if self.training_interrupt.should_stop(self.state):
                 break
 
-        self.call_callbacks(
-            "on_batch_end",
-            loss=total_loss / total_tokens,
-            num_tokens=total_tokens,
-        )
-
         return total_loss, total_tokens
 
     def optimizer_step(self, num_tokens: int):
@@ -266,15 +424,15 @@ class Trainer:
                 param.grad.div_(num_tokens)
 
         if self.config.max_grad_norm is not None:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
+            torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config.max_grad_norm
             )
 
-        # TODO: use learning rate scheduler here
-        # to figure out what lr to use
         self.optim.step()
 
     def train(self, train_dl: torch.utils.data.DataLoader):
+        torch.set_float32_matmul_precision("high")
+
         self.call_callbacks("on_train_begin")
 
         self.model.train()
@@ -286,6 +444,13 @@ class Trainer:
             loss_sum, num_tokens = self.accumulate_gradients(train_data_iter)
             # update optimizer progress
             self.optimizer_step(num_tokens=num_tokens)
+
+            self.call_callbacks(
+                "on_batch_end",
+                loss=loss_sum / num_tokens,
+                num_tokens=num_tokens,
+            )
+            self.lr_scheduler.step()
 
         self.call_callbacks("on_train_end")
 
