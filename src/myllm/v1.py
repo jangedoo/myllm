@@ -46,7 +46,7 @@ class MyLLMV1(torch.nn.Module):
         nlayers: int,
         nheads: int,
         dim_ff: int,
-        padding_idx: int,
+        padding_idx: int | None,
         rope_theta: float,
         init_std: float = 0.02,
         tie_embeddings: bool = True,
@@ -54,6 +54,7 @@ class MyLLMV1(torch.nn.Module):
         super().__init__()
         self.init_std = init_std
         self.nlayers = nlayers
+        self.embed_dim = embed_dim
 
         self.emb_layer = torch.nn.Embedding(
             num_embeddings=vocab_size, embedding_dim=embed_dim, padding_idx=padding_idx
@@ -132,3 +133,25 @@ class MyLLMV1(torch.nn.Module):
     @property
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
+
+    # many of these properties have been adapted from nanoChat
+    # Ref: https://github.com/karpathy/nanochat/blob/92d63d4e8bb4df75c3b71618f31ddde2378b2bcd/nanochat/gpt.py
+
+    @property
+    def num_matmul_params(self):
+        """
+        Number of parameters that participate in matrix multiplication
+        each of these parameters cost 2 FLOPs/param to the forward pass.
+        """
+        return sum(
+            m.weight.numel() for m in self.modules() if isinstance(m, torch.nn.Linear)
+        )
+
+    def get_estimated_flops(self, seq_len: int):
+        """
+        Estimated FLOPs per token for the model while training (forward + backward)
+        """
+        num_flops_per_token = 6 * self.num_matmul_params
+        num_flops_per_token += self.nlayers * self.embed_dim * seq_len  # attn flops
+
+        return num_flops_per_token
