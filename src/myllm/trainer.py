@@ -1,3 +1,4 @@
+import html
 import json
 import math
 import time
@@ -337,6 +338,84 @@ class StateUpdateCallback(Callback):
         state.add_tokens_processed(num_tokens)
 
 
+def _inject_model_summary(output_path: Path, metadata_path: Path) -> None:
+    if not metadata_path.is_file():
+        return
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    model = metadata.get("model", {})
+    training = metadata.get("training", {})
+    columns = (
+        "Run",
+        "Model",
+        "Parameters",
+        "Depth",
+        "Width",
+        "Heads",
+        "Head dim",
+        "FFN",
+        "Vocabulary",
+        "Dtype",
+        "FP8",
+        "Compile mode",
+    )
+    values = (
+        metadata.get("run", {}).get("name"),
+        model.get("class"),
+        model.get("parameters", {}).get("total"),
+        model.get("depth"),
+        model.get("embed_dim"),
+        model.get("num_heads"),
+        model.get("head_dim"),
+        model.get("ff_dim"),
+        model.get("vocab_size"),
+        training.get("compute_dtype"),
+        "yes" if training.get("fp8", False) else "no",
+        training.get("torch_compile_mode", "default"),
+    )
+
+    def format_value(value):
+        if value is None:
+            return "—"
+        if isinstance(value, int):
+            return f"{value:,}"
+        return str(value)
+
+    headers = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
+    cells = "".join(f"<td>{html.escape(format_value(value))}</td>" for value in values)
+    summary = f"""
+<section class="model-summary">
+  <h1>Model information</h1>
+  <div class="model-table-wrap">
+    <table><thead><tr>{headers}</tr></thead><tbody><tr>{cells}</tr></tbody></table>
+  </div>
+</section>
+"""
+    styles = """
+<style>
+  body { margin: 0; background: #f8fafc; color: #0f172a;
+         font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+  .model-summary { box-sizing: border-box; max-width: 1400px; margin: 0 auto;
+                   padding: 28px 28px 4px; }
+  .model-summary h1 { font-size: 28px; margin: 0 0 18px; }
+  .model-table-wrap { overflow-x: auto; border: 1px solid #e2e8f0;
+                      border-radius: 10px; background: white; }
+  .model-summary table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .model-summary th, .model-summary td { padding: 9px 11px;
+      border-bottom: 1px solid #e2e8f0; text-align: right; white-space: nowrap; }
+  .model-summary th { color: #475569; background: #f1f5f9; font-weight: 600; }
+  .model-summary th:first-child, .model-summary td:first-child {
+      text-align: left; font-weight: 600; }
+  body > div[id] { max-width: 1400px; margin-left: auto; margin-right: auto;
+                   overflow-x: auto; }
+</style>
+"""
+    document = output_path.read_text(encoding="utf-8")
+    document = document.replace("</head>", f"{styles}</head>", 1)
+    document = document.replace("<body>", f"<body>{summary}", 1)
+    output_path.write_text(document, encoding="utf-8")
+
+
 def save_training_metrics_dashboard(metrics_path: Path):
     import pandas as pd
     from lets_plot import (
@@ -423,12 +502,14 @@ def save_training_metrics_dashboard(metrics_path: Path):
         fit=False,
     ) + ggsize(1400, 1000)
 
+    output_path = metrics_path.with_suffix(".html")
     ggsave(
         dashboard,
-        metrics_path.with_suffix(".html").name,
+        output_path.name,
         path=str(metrics_path.parent),
         iframe=False,
     )
+    _inject_model_summary(output_path, metrics_path.with_name("metadata.json"))
 
 
 class MetricsCallback(Callback):
