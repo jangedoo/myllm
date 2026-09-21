@@ -115,10 +115,12 @@ def resolve_pretraining_plan(
                 micro_batch_size = candidate
 
         if micro_batch_size is None:
-            raise RuntimeError(
+            print(
                 f"Depth {depth} needs an estimated {minimum_estimate_gib:.2f} GiB "
-                f"for micro-batch size 1; only {usable_memory_gib:.2f} GiB is usable"
+                f"for micro-batch size 1; only {usable_memory_gib:.2f} GiB is usable. "
+                "\nSetting it to 1. Check VRAM usage and explicitly pass --bs if under utilized"
             )
+            micro_batch_size = 1
     else:
         micro_batch_size = user_supplied_batch_size
 
