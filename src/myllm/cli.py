@@ -26,6 +26,7 @@ cli = typer.Typer(no_args_is_help=True, epilog=banner)
 
 data_cli = typer.Typer(no_args_is_help=True, help="Data tokenization")
 sft_cli = typer.Typer(no_args_is_help=True, help="Supervised Fine Tuning")
+pretrain_cli = typer.Typer(no_args_is_help=True, help="Pretraining commands")
 memory_cli = typer.Typer(
     no_args_is_help=True,
     help="Estimate and explore memory requirements.",
@@ -33,6 +34,7 @@ memory_cli = typer.Typer(
 
 cli.add_typer(data_cli, name="data")
 cli.add_typer(sft_cli, name="sft")
+cli.add_typer(pretrain_cli, name="pretrain")
 cli.add_typer(memory_cli, name="memory")
 
 
@@ -44,6 +46,25 @@ def doctor():
     print_doctor_report()
 
 
+@cli.command()
+def chat(
+    dev: Annotated[
+        bool,
+        typer.Option("--dev", help="Load a run from the dev models folder."),
+    ] = False,
+    tag: Annotated[
+        str,
+        typer.Option("--tag", help="Training run folder name."),
+    ] = "latest",
+):
+    """Chat interactively with a trained model."""
+    from myllm.serve import run_chat
+
+    exit_code = run_chat(dev=dev, tag=tag)
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
 @data_cli.command()
 def tokenize(dev: bool = False):
     typer.echo(f"Tokenizing data {dev=}")
@@ -52,8 +73,8 @@ def tokenize(dev: bool = False):
     tokenize(output_dir=config.PRETRAIN_DATA_DIR, dev=dev)
 
 
-@cli.command()
-def pretrain(
+@pretrain_cli.command("train")
+def pretrain_train(
     depth: int = 12,
     dev: bool = False,
     tag: str = "latest",
@@ -71,6 +92,7 @@ def pretrain(
     max_grad_norm: float | None = None,
     compute_dtype: Literal["bfloat16", "float16", "float32"] | None = None,
 ):
+    """Launch a pretraining run."""
     import torch
 
     from myllm.scripts.pretrain import launch_training
@@ -98,6 +120,36 @@ def pretrain(
         max_grad_norm=max_grad_norm,
         compute_dtype=dtype,
     )
+
+
+@pretrain_cli.command("compare")
+def pretrain_compare(
+    runs: Annotated[
+        list[str],
+        typer.Argument(help="Two or more run folder names to compare."),
+    ],
+    dev: Annotated[
+        bool,
+        typer.Option("--dev", help="Resolve runs from the dev folder."),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output HTML path."),
+    ] = None,
+):
+    """Build an interactive HTML dashboard comparing pretraining runs."""
+    from myllm.scripts.compare_pretraining import (
+        resolve_run_dirs,
+        save_comparison_dashboard,
+    )
+
+    try:
+        run_dirs = resolve_run_dirs(runs, dev=dev)
+        output_path = save_comparison_dashboard(run_dirs, output_path=output)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="runs") from exc
+
+    typer.echo(f"Comparison dashboard: {output_path}")
 
 
 @memory_cli.command("sweep")
