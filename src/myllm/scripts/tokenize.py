@@ -12,7 +12,8 @@ SUBSET = "sample-10BT"
 SPLIT = "train"
 
 ROWS_PER_SHARD = 30_000  # no. of documents. thse could have thousands of tokens per doc
-MAX_SHARDS_FOR_DEV = 10
+MAX_SHARDS_FOR_DEV = 10  # about 31 million tokens per shard. 310 million tokens
+MAX_SHARDS_FOR_FULL = 100  # about 31 million tokens per shard. 3.1 billion token
 
 
 def tokenize(output_dir: str | Path, dev=False):
@@ -38,6 +39,8 @@ def tokenize(output_dir: str | Path, dev=False):
     total_tokens = 0
     batches = tokenized_ds.iter(batch_size=ROWS_PER_SHARD)
 
+    max_shards = MAX_SHARDS_FOR_DEV if dev else MAX_SHARDS_FOR_FULL
+
     try:
         for shard_idx, batch in enumerate(batches):
             num_tokens_in_batch = sum(map(len, batch["token_ids"]))
@@ -51,7 +54,7 @@ def tokenize(output_dir: str | Path, dev=False):
             )
             pq.write_table(table, file_path, compression="zstd")
 
-            if dev and shard_idx + 1 >= MAX_SHARDS_FOR_DEV:
+            if shard_idx + 1 >= max_shards:
                 print("Max shards for dev processed. Stopping")
                 break
     finally:
