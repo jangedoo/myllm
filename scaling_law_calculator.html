@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MyLLM scaling-law calculator</title>
+  <script src="https://cdn.plot.ly/plotly-4.0.0.min.js" charset="utf-8"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #102037;
+      --muted: #5c6b7e;
+      --line: #dce4ee;
+      --soft: #f5f8fc;
+      --brand: #0f766e;
+      --brand-dark: #115e59;
+      --warn: #9a3412;
+      --warn-bg: #fff7ed;
+      --shadow: 0 12px 34px rgba(15, 23, 42, .08);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #edf2f7;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", sans-serif;
+    }
+    main { max-width: 1480px; margin: 0 auto; padding: 38px 28px 64px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(29px, 4vw, 43px); letter-spacing: -.035em; }
+    h2 { font-size: 21px; letter-spacing: -.015em; }
+    h3 { font-size: 15px; margin-bottom: 5px; }
+    p { color: var(--muted); line-height: 1.55; }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #e9eef5;
+      color: #334155;
+    }
+
+    .hero { margin-bottom: 24px; }
+    .hero p { max-width: 880px; font-size: 16px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge {
+      padding: 6px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      background: rgba(255,255,255,.65);
+      color: #475569;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .card {
+      margin-bottom: 20px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+    .card-head { padding: 22px 24px 0; }
+    .card-head p { margin-bottom: 0; }
+    .card-body { padding: 20px 24px 24px; }
+
+    #config-list { display: grid; gap: 10px; }
+    .config-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 1.1fr) minmax(130px, .8fr)
+                             minmax(130px, .8fr) 42px;
+      gap: 10px;
+      align-items: end;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--soft);
+    }
+    label { display: grid; gap: 6px; color: #475569; font-size: 12px; font-weight: 700; }
+    input {
+      width: 100%;
+      height: 41px;
+      padding: 0 11px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      outline: none;
+      background: white;
+      color: var(--ink);
+      font: inherit;
+    }
+    input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(15,118,110,.13); }
+    input.invalid { border-color: #dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,.1); }
+    button {
+      min-height: 41px;
+      border: 0;
+      border-radius: 8px;
+      padding: 0 15px;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }
+    .primary { background: var(--brand); color: white; }
+    .primary:hover { background: var(--brand-dark); }
+    .secondary { border: 1px solid #cbd5e1; background: white; color: #334155; }
+    .secondary:hover { background: #f8fafc; }
+    .remove { padding: 0; border: 1px solid #fecaca; background: #fff; color: #b91c1c; font-size: 19px; }
+    .remove:disabled { cursor: not-allowed; opacity: .35; }
+    .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+    .factor-row {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) 1fr;
+      gap: 14px;
+      align-items: end;
+      margin-top: 16px;
+    }
+    .factor-note { margin: 0 0 4px; font-size: 13px; }
+    #messages { margin-top: 14px; }
+    .message {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border: 1px solid #fed7aa;
+      border-radius: 8px;
+      background: var(--warn-bg);
+      color: var(--warn);
+      font-size: 13px;
+    }
+
+    .chart-grid { display: grid; grid-template-columns: 1.7fr 1fr; gap: 20px; }
+    .chart { min-height: 480px; width: 100%; }
+    .chart.small { min-height: 480px; }
+    .modebar { opacity: .45; }
+
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid #e5eaf0; text-align: right; white-space: nowrap; }
+    th { background: #f1f5f9; color: #475569; font-size: 11px; letter-spacing: .035em; text-transform: uppercase; }
+    th:first-child, td:first-child { text-align: left; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .result-name { font-weight: 750; }
+    .fit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+    .stat { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
+    .stat strong { display: block; margin-top: 4px; font-size: 17px; }
+    .formula {
+      overflow-x: auto;
+      margin: 12px 0 18px;
+      padding: 15px;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap;
+    }
+    .assumptions { margin: 0; padding-left: 21px; color: #475569; line-height: 1.55; }
+    .assumptions li + li { margin-top: 8px; }
+    .footer-note { margin: 18px 0 0; font-size: 12px; }
+
+    @media (max-width: 980px) {
+      .chart-grid { grid-template-columns: 1fr; }
+      .chart, .chart.small { min-height: 430px; }
+      .fit-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      main { padding: 25px 12px 45px; }
+      .card-head { padding: 18px 16px 0; }
+      .card-body { padding: 16px; }
+      .config-row { grid-template-columns: 1fr 1fr; }
+      .config-row label:first-child { grid-column: 1 / -1; }
+      .remove { grid-column: 2; justify-self: end; width: 42px; }
+      .factor-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <h1>MyLLM scaling-law calculator</h1>
+    <p>
+      Compare one or more model-and-token budgets using an empirical loss fit and
+      a hardware-calibrated throughput model derived from dev runs
+      <code>latest-001</code> through <code>latest-005</code>.
+    </p>
+    <div class="badges">
+      <span class="badge">6.49M–70.85M calibrated parameters</span>
+      <span class="badge">1M–100M calibrated tokens</span>
+      <span class="badge">Sequence length 1,024</span>
+      <span class="badge">RTX PRO 4000 Blackwell baseline</span>
+    </div>
+  </header>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Configurations</h2>
+      <p>Quantities accept plain numbers or suffixes such as <code>70M</code> and <code>1.5B</code>.</p>
+    </div>
+    <div class="card-body">
+      <div id="config-list"></div>
+      <div class="actions">
+        <button class="secondary" id="add-config" type="button">+ Add configuration</button>
+        <button class="primary" id="calculate" type="button">Update estimates</button>
+      </div>
+      <div class="factor-row">
+        <label>
+          Relative GPU speed
+          <input id="gpu-factor" value="1.0" inputmode="decimal" aria-describedby="gpu-note">
+        </label>
+        <p class="factor-note" id="gpu-note">
+          <strong>1.0×</strong> is the measured RTX PRO 4000 Blackwell baseline.
+          Change this only if you have a benchmark-derived relative factor.
+        </p>
+      </div>
+      <div id="messages" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <div class="chart-grid">
+    <section class="card">
+      <div class="card-head">
+        <h2>Predicted training loss</h2>
+        <p>Curves begin at 1M tokens, the lower boundary of the fitted data.</p>
+      </div>
+      <div id="loss-chart" class="chart"></div>
+    </section>
+    <section class="card">
+      <div class="card-head">
+        <h2>Estimated training throughput</h2>
+        <p>Steady-state tokens/second at sequence length 1,024.</p>
+      </div>
+      <div id="throughput-chart" class="chart small"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Configuration estimates</h2>
+    </div>
+    <div class="card-body table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Configuration</th>
+            <th>Parameters</th>
+            <th>Training tokens</th>
+            <th>Final loss</th>
+            <th>Perplexity</th>
+            <th>Token/s</th>
+            <th>Training time</th>
+            <th>Inferred architecture</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Calibration data</h2>
+      <p>Terminal loss is the trailing 20-step mean. Throughput is the slope after the first 10M tokens.</p>
+    </div>
+    <div class="card-body">
+      <div class="fit-grid">
+        <div class="stat"><span>Runs</span><strong>5</strong></div>
+        <div class="stat"><span>Loss-fit RMSE</span><strong>0.286</strong></div>
+        <div class="stat"><span>Observed compute plateau</span><strong>46.3 TFLOP/s</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Run</th><th>Parameters</th><th>Depth</th><th>Width</th><th>Tokens</th><th>Final loss</th><th>Perplexity</th><th>Steady token/s</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>latest-001</td><td>6,489,984</td><td>1</td><td>128</td><td>100,008,480</td><td>7.400</td><td>1,636</td><td>628,334</td></tr>
+            <tr><td>latest-002</td><td>6,688,256</td><td>2</td><td>128</td><td>100,008,480</td><td>7.376</td><td>1,597.2</td><td>618,015</td></tr>
+            <tr><td>latest-003</td><td>25,972,992</td><td>4</td><td>384</td><td>100,008,480</td><td>6.089</td><td>441</td><td>280,069</td></tr>
+            <tr><td>latest-004</td><td>44,081,152</td><td>6</td><td>512</td><td>100,008,480</td><td>5.845</td><td>345.5</td><td>169,157</td></tr>
+            <tr><td>latest-005</td><td>70,846,720</td><td>8</td><td>640</td><td>100,008,480</td><td>5.684</td><td>294.1</td><td>109,686</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Model and assumptions</h2></div>
+    <div class="card-body">
+      <h3>Loss fit</h3>
+      <p>
+        The five histories were smoothed with a trailing 20-step mean and sampled
+        approximately uniformly in log-token space. The fitted two-factor power law is:
+      </p>
+      <div class="formula">L(N,D) = min(ln(49,152), 7.0722·N<sup>−0.6175</sup> + 10.2060·D<sup>−0.1499</sup>) &nbsp; where N and D are in millions</div>
+
+      <h3>Throughput fit</h3>
+      <p>
+        The calculator infers the nearest architecture produced by the current MyLLM
+        depth/width rule, applies the repository's training-FLOP estimator, then converts
+        achieved compute into token/s. GPU utilization is modeled as saturating with
+        per-token work:
+      </p>
+      <div class="formula">achieved TFLOP/s = 46.325·(1 − exp(−F<sub>G</sub>/0.05207)); &nbsp; token/s = achieved FLOP/s ÷ F</div>
+
+      <ul class="assumptions">
+        <li>This is an empirical training-loss fit, not a universal scaling law and not a validation-loss predictor.</li>
+        <li>Perplexity is calculated as <code>exp(final loss)</code>.</li>
+        <li>Only five runs are available. Model size varies, but every run stops near 100M tokens, so token extrapolation is especially uncertain.</li>
+        <li>The reliable interpolation region is 6.49M–70.85M parameters and 1M–100M tokens. The page still calculates outside it but displays a warning.</li>
+        <li>The loss ceiling is <code>ln(vocab_size)</code>, corresponding to the 49,152-token vocabulary's near-uniform initial prediction.</li>
+        <li>All calibration runs use MyLLMV1, tied embeddings, head dimension 128, FFN width 4× model width, RoPE, causal SDPA, BF16, fused AdamW, cosine LR, sequence length 1,024, micro-batch 32, and gradient accumulation 5.</li>
+        <li>The throughput baseline assumes the logs were produced on PyTorch GPU 0: NVIDIA RTX PRO 4000 Blackwell (24,467 MiB). The host also has an RTX 2070 SUPER (8,192 MiB), but the artifact metadata does not store the device name.</li>
+        <li>Throughput estimates assume the same software stack and training recipe. They exclude startup/compile overhead, data bottlenecks, checkpoint time, evaluation, memory limits, and multi-GPU communication.</li>
+        <li>Architecture inference is discrete. An arbitrary parameter input is mapped to the nearest architecture generated by the repository's depth-to-width rule; the entered parameter count itself is still used for loss prediction.</li>
+        <li>Training time is simply total tokens divided by estimated steady-state token/s. It is not a wall-clock guarantee.</li>
+      </ul>
+      <p class="footer-note">Generated from local artifacts on 2026-09-20. Plotting requires access to the Plotly CDN.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+  "use strict";
+
+  const LOSS = {
+    vocabCeiling: Math.log(49152),
+    a: 7.072155453146158,
+    alpha: 0.6175,
+    b: 10.205957326555845,
+    beta: 0.1499,
+    minParams: 6489984,
+    maxParams: 70846720,
+    minTokens: 1000000,
+    maxTokens: 100008480
+  };
+  const THROUGHPUT = { peakTflops: 46.325, saturationGflops: 0.0520720721 };
+  const VOCAB_SIZE = 49152;
+  const SEQ_LEN = 1024;
+  const COLORS = ["#0f766e", "#ea580c", "#2563eb", "#7c3aed", "#be123c", "#4d7c0f", "#0891b2", "#a16207"];
+  let nextId = 1;
+
+  const $ = (selector) => document.querySelector(selector);
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, char => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+    })[char]);
+  }
+
+  function parseQuantity(raw) {
+    const match = String(raw).trim().replaceAll(",", "").match(/^([0-9]*\.?[0-9]+)\s*([kmbt])?$/i);
+    if (!match) return NaN;
+    const scales = { "": 1, k: 1e3, m: 1e6, b: 1e9, t: 1e12 };
+    return Number(match[1]) * scales[(match[2] || "").toLowerCase()];
+  }
+
+  function compact(value) {
+    return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+  }
+
+  function integer(value) {
+    return new Intl.NumberFormat("en", { maximumFractionDigits: 0 }).format(value);
+  }
+
+  function perplexity(loss) {
+    return new Intl.NumberFormat("en", { maximumFractionDigits: 1 }).format(Math.exp(loss));
+  }
+
+  function duration(seconds) {
+    if (!Number.isFinite(seconds)) return "—";
+    if (seconds < 3600) return `${(seconds / 60).toFixed(1)} min`;
+    if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
+    return `${(seconds / 86400).toFixed(1)} days`;
+  }
+
+  function bankersRound(value) {
+    const floor = Math.floor(value);
+    const fraction = value - floor;
+    if (Math.abs(fraction - 0.5) < 1e-10) return floor % 2 === 0 ? floor : floor + 1;
+    return Math.round(value);
+  }
+
+  function architectureForDepth(depth) {
+    const width = Math.max(128, bankersRound((depth * 1024 / 12) / 128) * 128);
+    const heads = width / 128;
+    const ff = width * 4;
+    const params = VOCAB_SIZE * width + depth * (12 * width * width + 13 * width) + 2 * width;
+    const matmulParams = VOCAB_SIZE * width + depth * 12 * width * width;
+    const flopsPerToken = 6 * matmulParams + depth * width * SEQ_LEN;
+    return { depth, width, heads, ff, params, flopsPerToken };
+  }
+
+  function nearestArchitecture(targetParams) {
+    let best = architectureForDepth(1);
+    for (let depth = 2; depth <= 64; depth += 1) {
+      const candidate = architectureForDepth(depth);
+      if (Math.abs(candidate.params - targetParams) < Math.abs(best.params - targetParams)) best = candidate;
+    }
+    return best;
+  }
+
+  function predictedLoss(params, tokens) {
+    const n = params / 1e6;
+    const d = tokens / 1e6;
+    const raw = LOSS.a * Math.pow(n, -LOSS.alpha) + LOSS.b * Math.pow(d, -LOSS.beta);
+    return Math.min(LOSS.vocabCeiling, raw);
+  }
+
+  function predictedThroughput(architecture, gpuFactor) {
+    const gigaFlopsPerToken = architecture.flopsPerToken / 1e9;
+    const achievedTflops = THROUGHPUT.peakTflops * (1 - Math.exp(-gigaFlopsPerToken / THROUGHPUT.saturationGflops));
+    return gpuFactor * achievedTflops * 1e12 / architecture.flopsPerToken;
+  }
+
+  function logSpace(start, stop, count = 100) {
+    if (start === stop) return [start];
+    const a = Math.log(start);
+    const b = Math.log(stop);
+    return Array.from({ length: count }, (_, i) => Math.exp(a + (b - a) * i / (count - 1)));
+  }
+
+  function addConfiguration(name = `Config ${nextId}`, params = "26M", tokens = "100M") {
+    const id = nextId++;
+    const row = document.createElement("div");
+    row.className = "config-row";
+    row.dataset.id = id;
+    row.innerHTML = `
+      <label>Name<input class="config-name" value="${escapeHtml(name)}" aria-label="Configuration name"></label>
+      <label>Total parameters<input class="config-params" value="${escapeHtml(params)}" inputmode="decimal" aria-label="Total parameters"></label>
+      <label>Total training tokens<input class="config-tokens" value="${escapeHtml(tokens)}" inputmode="decimal" aria-label="Total training tokens"></label>
+      <button class="remove" type="button" title="Remove configuration" aria-label="Remove configuration">×</button>`;
+    row.querySelector(".remove").addEventListener("click", () => {
+      row.remove();
+      updateRemoveButtons();
+      render();
+    });
+    row.querySelectorAll("input").forEach(input => input.addEventListener("change", render));
+    $("#config-list").append(row);
+    updateRemoveButtons();
+  }
+
+  function updateRemoveButtons() {
+    const buttons = [...document.querySelectorAll(".remove")];
+    buttons.forEach(button => button.disabled = buttons.length === 1);
+  }
+
+  function readConfigurations() {
+    const configs = [];
+    document.querySelectorAll(".config-row").forEach((row, index) => {
+      const nameInput = row.querySelector(".config-name");
+      const paramsInput = row.querySelector(".config-params");
+      const tokensInput = row.querySelector(".config-tokens");
+      const params = parseQuantity(paramsInput.value);
+      const tokens = parseQuantity(tokensInput.value);
+      const name = nameInput.value.trim() || `Config ${index + 1}`;
+      paramsInput.classList.toggle("invalid", !(params >= 1e6));
+      tokensInput.classList.toggle("invalid", !(tokens >= 1e6));
+      if (params >= 1e6 && tokens >= 1e6) configs.push({ name, params, tokens, color: COLORS[index % COLORS.length] });
+    });
+    return configs;
+  }
+
+  function plotLayout(title, xTitle, yTitle) {
+    return {
+      title: { text: title, x: 0.02, xanchor: "left", font: { size: 16, color: "#102037" } },
+      margin: { l: 72, r: 25, t: 56, b: 65 },
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "#ffffff",
+      font: { family: "Inter, system-ui, sans-serif", color: "#475569" },
+      xaxis: { title: xTitle, gridcolor: "#e8edf3", zeroline: false },
+      yaxis: { title: yTitle, gridcolor: "#e8edf3", zeroline: false },
+      legend: { orientation: "h", y: -0.2, x: 0 },
+      hoverlabel: { bgcolor: "#0f172a", bordercolor: "#0f172a", font: { color: "white", size: 13 } }
+    };
+  }
+
+  function render() {
+    const configs = readConfigurations();
+    const gpuFactor = Number($("#gpu-factor").value);
+    $("#gpu-factor").classList.toggle("invalid", !(gpuFactor > 0));
+    const messages = [];
+
+    if (!configs.length || !(gpuFactor > 0)) {
+      $("#messages").innerHTML = '<div class="message">Enter at least one valid configuration. Parameters and tokens must each be at least 1M, and GPU speed must be positive.</div>';
+      return;
+    }
+
+    const lossTraces = [];
+    const throughput = [];
+    const results = [];
+    configs.forEach(config => {
+      const tokenPoints = logSpace(LOSS.minTokens, config.tokens);
+      const losses = tokenPoints.map(tokens => predictedLoss(config.params, tokens));
+      const architecture = nearestArchitecture(config.params);
+      const tokensPerSecond = predictedThroughput(architecture, gpuFactor);
+
+      lossTraces.push({
+        type: "scatter",
+        mode: "lines",
+        name: config.name,
+        x: tokenPoints,
+        y: losses,
+        line: { color: config.color, width: 3 },
+        hovertemplate: "%{y:.3f}<extra></extra>"
+      });
+      throughput.push(tokensPerSecond);
+      results.push({ ...config, architecture, tokensPerSecond, finalLoss: losses.at(-1) });
+
+      if (config.params < LOSS.minParams * 0.99 || config.params > LOSS.maxParams * 1.01) {
+        messages.push(`${config.name}: parameter count is outside the calibrated range.`);
+      }
+      if (config.tokens > LOSS.maxTokens * 1.01) {
+        messages.push(`${config.name}: token count is outside the calibrated range.`);
+      }
+      const relativeArchError = Math.abs(architecture.params - config.params) / config.params;
+      if (relativeArchError > 0.12) {
+        messages.push(`${config.name}: throughput uses a nearest architecture ${Math.round(relativeArchError * 100)}% away from the entered parameter count.`);
+      }
+    });
+
+    const lossLayout = plotLayout("Loss versus tokens", "Training tokens", "Cross-entropy loss");
+    lossLayout.xaxis.type = "log";
+    lossLayout.xaxis.tickformat = "~s";
+    Plotly.react("loss-chart", lossTraces, lossLayout, { responsive: true, displaylogo: false });
+
+    const throughputLayout = plotLayout("Estimated steady-state rate", "Tokens / second", "");
+    throughputLayout.margin.l = 110;
+    throughputLayout.margin.r = 65;
+    throughputLayout.xaxis.tickformat = "~s";
+    throughputLayout.xaxis.range = [0, Math.max(...throughput) * 1.18];
+    throughputLayout.yaxis = { automargin: true };
+    throughputLayout.showlegend = false;
+    Plotly.react("throughput-chart", [{
+      type: "bar",
+      orientation: "h",
+      x: throughput,
+      y: configs.map(config => config.name),
+      marker: { color: configs.map(config => config.color) },
+      text: throughput.map(integer),
+      textposition: "outside",
+      cliponaxis: false,
+      hovertemplate: "%{x:,.0f}<extra></extra>"
+    }], throughputLayout, { responsive: true, displaylogo: false });
+
+    $("#results-body").innerHTML = results.map(result => {
+      const arch = result.architecture;
+      return `<tr>
+        <td class="result-name">${escapeHtml(result.name)}</td>
+        <td>${integer(result.params)}</td>
+        <td>${integer(result.tokens)}</td>
+        <td>${result.finalLoss.toFixed(3)}</td>
+        <td>${perplexity(result.finalLoss)}</td>
+        <td>${integer(result.tokensPerSecond)}</td>
+        <td>${duration(result.tokens / result.tokensPerSecond)}</td>
+        <td>${arch.depth}L · ${arch.width}d · ${arch.heads} heads (${compact(arch.params)} params)</td>
+      </tr>`;
+    }).join("");
+    $("#messages").innerHTML = [...new Set(messages)].map(message => `<div class="message">${escapeHtml(message)}</div>`).join("");
+  }
+
+  $("#add-config").addEventListener("click", () => {
+    addConfiguration(`Config ${nextId}`, "44M", "100M");
+    render();
+  });
+  $("#calculate").addEventListener("click", render);
+  $("#gpu-factor").addEventListener("change", render);
+  window.addEventListener("resize", () => {
+    Plotly.Plots.resize("loss-chart");
+    Plotly.Plots.resize("throughput-chart");
+  });
+
+  addConfiguration("26M model", "25.97M", "100M");
+  addConfiguration("71M model", "70.85M", "100M");
+  render();
+</script>
+</body>
+</html>
