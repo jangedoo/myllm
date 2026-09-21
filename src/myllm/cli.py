@@ -91,6 +91,10 @@ def pretrain_train(
     min_lr_ratio: float | None = None,
     max_grad_norm: float | None = None,
     compute_dtype: Literal["bfloat16", "float16", "float32"] | None = None,
+    torch_compile_mode: Literal[
+        "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"
+    ] = "default",
+    fp8: bool = False,
 ):
     """Launch a pretraining run."""
     import torch
@@ -119,6 +123,8 @@ def pretrain_train(
         min_lr_ratio=min_lr_ratio,
         max_grad_norm=max_grad_norm,
         compute_dtype=dtype,
+        torch_compile_mode=torch_compile_mode,
+        fp8=fp8,
     )
 
 

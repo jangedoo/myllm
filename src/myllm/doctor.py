@@ -258,6 +258,8 @@ def training_report(model: torch.nn.Module, config: Any) -> Table:
             ("Optimizer", "fused AdamW"),
             ("Learning rate", f"{config.lr:g}"),
             ("LR schedule", config.lr_schedule),
+            ("fp8 enabled", str(config.fp8)),
+            ("Compile mode", config.torch_compile_mode),
         ]
     )
     if config.max_grad_norm is not None:

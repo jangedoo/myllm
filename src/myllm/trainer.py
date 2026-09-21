@@ -156,6 +156,8 @@ class TrainingConfig:
     min_lr_ratio: float = 0.1
     max_grad_norm: float | None = None
     compute_dtype: torch.dtype = torch.bfloat16
+    torch_compile_mode: str = "default"
+    fp8: bool = False
 
     def resolve(self) -> "ResolvedTrainerConfig":
         return ResolvedTrainerConfig.from_training_config(self)
@@ -177,6 +179,8 @@ class ResolvedTrainerConfig:
     min_lr_ratio: float = 0.1
     max_grad_norm: float | None = None
     compute_dtype: torch.dtype = torch.bfloat16
+    torch_compile_mode: str = "default"
+    fp8: bool = False
 
     @classmethod
     def from_training_config(cls, config: TrainingConfig):
@@ -245,6 +249,8 @@ class ResolvedTrainerConfig:
             min_lr_ratio=config.min_lr_ratio,
             max_grad_norm=config.max_grad_norm,
             compute_dtype=config.compute_dtype,
+            fp8=config.fp8,
+            torch_compile_mode=config.torch_compile_mode,
         )
 
     def make_interrupt(self) -> BaseInterrupt:
@@ -351,9 +357,9 @@ def save_training_metrics_dashboard(metrics_path: Path):
         return
 
     smoothing_window = min(20, max(1, len(metrics) // 10))
-    metrics["loss_smoothed"] = metrics["loss"].rolling(
-        smoothing_window, min_periods=1
-    ).mean()
+    metrics["loss_smoothed"] = (
+        metrics["loss"].rolling(smoothing_window, min_periods=1).mean()
+    )
     metrics["tokens_per_second_k"] = metrics["tokens_per_second"] / 1_000
     metrics["tokens_processed_m"] = metrics["tokens_processed"] / 1_000_000
     metrics["learning_rate_micro"] = metrics["learning_rate"] * 1_000_000
@@ -477,6 +483,29 @@ class CheckpointCallback(Callback):
         )
 
 
+class ModelCompileCallback(Callback):
+    def on_train_begin(self, state: TrainerState, trainer: "Trainer", **kwargs):
+        model = trainer.model
+        config = trainer.config
+
+        if config.fp8:
+            from torchao.float8.float8_linear_utils import convert_to_float8_training
+
+            model = model.cuda()
+            convert_to_float8_training(model)
+
+        trainer.model = model
+        if (
+            config.torch_compile_mode is not None
+            and config.torch_compile_mode.startswith("max")
+        ):
+            print(
+                f"Info: You've selected {config.torch_compile_mode} which will take a long time."
+            )
+
+        trainer.model.compile(dynamic=False, mode=config.torch_compile_mode)
+
+
 def cycle_data_loader(train_dl: torch.utils.data.DataLoader):
     while True:
         yielded_batch = False
@@ -501,6 +530,7 @@ class Trainer:
 
         self.training_interrupt = self.config.make_interrupt()
         self.callbacks = [
+            ModelCompileCallback(),
             StateUpdateCallback(),
             TqdmCallback(),
             *(callbacks or []),

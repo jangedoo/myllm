@@ -152,6 +152,8 @@ def resolve_training_config(
     min_lr_ratio: float | None = None,
     max_grad_norm: float | None = None,
     compute_dtype: torch.dtype | None = None,
+    torch_compile_mode: str = "default",
+    fp8: bool = False,
 ) -> TrainingConfig:
     if not any(
         value is not None
@@ -187,6 +189,8 @@ def resolve_training_config(
         max_train_steps=max_train_steps,
         grad_accum_steps=grad_accum_steps,
         target_tokens_per_update=target_tokens_per_update,
+        torch_compile_mode=torch_compile_mode,
+        fp8=fp8,
         **optional_overrides,
     )
 
@@ -279,6 +283,8 @@ def launch_training(
     min_lr_ratio: float | None = None,
     max_grad_norm: float | None = None,
     compute_dtype: torch.dtype | None = None,
+    torch_compile_mode: str = "default",
+    fp8: bool = False,
     dev: bool = False,
 ):
     tokenizer_config = AutoConfig.from_pretrained(config.TOKENIZER_MODEL_ID)
@@ -305,6 +311,8 @@ def launch_training(
         min_lr_ratio=min_lr_ratio,
         max_grad_norm=max_grad_norm,
         compute_dtype=compute_dtype,
+        torch_compile_mode=torch_compile_mode,
+        fp8=fp8,
     ).resolve()
 
     dataset = data.get_pretraining_dataset(
@@ -335,7 +343,7 @@ def launch_training(
         vocab_size=tokenizer_config.vocab_size,
         eos_token_id=tokenizer_config.eos_token_id,
     )
-    model.cuda().compile()
+
     trainer = Trainer(
         config=training_config,
         model=model,

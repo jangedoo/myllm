@@ -15,6 +15,7 @@ dependencies = [
     "pandas>=3.0.5",
     "pyarrow~=24.0.0",
     "torch>=2.14.0",
+    "torchao>=0.18.0",
     "transformers>=5.15.1",
 ]
 
