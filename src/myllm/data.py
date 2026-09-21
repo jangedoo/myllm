@@ -64,7 +64,7 @@ def pretrain_collator(batch: list[dict]):
 
 
 def get_pretraining_dataset(seq_len: int, eos_token_id: int, dev=True):
-    data_path = config.PRETRAIN_DATA_DIR / ("dev" if dev else "")
+    data_path = config.PRETRAIN_DATA_DIR / ("dev" if dev else "full")
     data_files = str(data_path / "*.parquet")
     ds = datasets.load_dataset(
         "parquet", data_files=data_files, split="train", streaming=True
