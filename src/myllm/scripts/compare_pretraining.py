@@ -1,5 +1,6 @@
 import html
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -133,11 +134,14 @@ def _summary_table(metrics: pd.DataFrame, metadata: list[dict[str, Any]]) -> str
         "Accum",
         "Peak LR",
         "Final loss",
+        "Perplexity",
         "Steps",
         "Tokens",
         "Elapsed",
         "Final tok/s",
         "Dtype",
+        "FP8",
+        "Compile mode",
     )
     rows = []
     for run_name, run_metrics in metrics.groupby("run", sort=False):
@@ -153,11 +157,14 @@ def _summary_table(metrics: pd.DataFrame, metadata: list[dict[str, Any]]) -> str
             _nested_value(meta, "training", "grad_accum_steps"),
             float(run_metrics["learning_rate"].max()),
             float(final["loss"]),
+            math.exp(float(final["loss"])),
             int(final["step"]),
             int(final["tokens_processed"]),
             f"{float(final['elapsed_seconds']) / 60:,.2f} min",
             f"{float(final['tokens_per_second']):,.0f}",
             _nested_value(meta, "training", "compute_dtype"),
+            "yes" if _nested_value(meta, "training", "fp8", default=False) else "no",
+            _nested_value(meta, "training", "torch_compile_mode", default="default"),
         )
         cells = "".join(
             f"<td>{html.escape(_format_number(value))}</td>" for value in values
