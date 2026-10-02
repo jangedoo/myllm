@@ -13,6 +13,7 @@ from myllm.v1 import MyLLMV1
 
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_K = 20
+DEFAULT_TOP_P = 1.0
 DEFAULT_MAX_NEW_TOKENS = 256
 
 
@@ -28,6 +29,33 @@ class TopKSampling:
         probabilities = torch.nn.functional.softmax(values, dim=-1)
         sampled_index = torch.multinomial(probabilities, num_samples=1)
         return indices.gather(-1, sampled_index).view(1, 1)
+
+
+class TopPSampling:
+    def __init__(self, p: float):
+        self.p = p
+
+    def next_token(self, logits):
+        # sort the logits
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        sorted_probs = torch.softmax(sorted_logits, dim=-1)
+        # compute cumulative probabilities
+        cum_probs = torch.cumsum(sorted_probs, dim=-1)
+        # create a mask indicating if cumulative probability is less than the top_p
+        valid_mask = cum_probs <= self.p
+        # sometimes the first token itself might have higher probability than the cumulative probability
+        # this is case, set the first one to be valid
+        if not valid_mask.any():
+            valid_mask[0] = True
+        # find the cutoff index
+        cutoff_index = torch.nonzero(valid_mask, as_tuple=False).max().item()
+        # get the token indices and their probabilities upto and including the cutoff index
+        valid_indices = sorted_indices[: cutoff_index + 1]
+        # calculate the probabilities again using subset of logits
+        valid_probs = torch.softmax(sorted_logits[: cutoff_index + 1], dim=-1)
+
+        next_token_id = torch.multinomial(valid_probs, num_samples=1)
+        return valid_indices[next_token_id].view(1, 1)
 
 
 @dataclass(frozen=True)
@@ -50,7 +78,9 @@ def resolve_run_dir(*, dev: bool, tag: str) -> Path:
     return run_dir
 
 
-def load_model_and_tokenizer(*, dev: bool, tag: str) -> LoadedModel:
+def load_model_and_tokenizer(
+    *, dev: bool, tag: str, device: str | None = None
+) -> LoadedModel:
     """Reconstruct a trained model and its tokenizer from a run directory."""
     # Keep transformers out of CLI startup; it is only imported after the first
     # actual chat message.
@@ -87,15 +117,19 @@ def load_model_and_tokenizer(*, dev: bool, tag: str) -> LoadedModel:
     )
     model.load_state_dict(checkpoint["model"])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device).eval()
+    model_device = (
+        torch.device(device)
+        if device
+        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(model_device).eval()
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_config["model_id"], use_fast=True
     )
     return LoadedModel(
         model=model,
         tokenizer=tokenizer,
-        device=device,
+        device=model_device,
         eos_token_id=tokenizer_config.get("eos_token_id"),
         context_window=metadata.get("training", {}).get("seq_len", 1024),
     )
@@ -109,12 +143,14 @@ def generate(
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     top_k: int = DEFAULT_TOP_K,
+    top_p: float = DEFAULT_TOP_P,
 ) -> str:
     """Generate and decode only the tokens added after ``prompt``."""
     if temperature <= 0:
         raise ValueError("temperature must be greater than 0")
 
     sampler = TopKSampling(k=top_k)
+    sampler = TopPSampling(p=top_p)
     token_ids = loaded.tokenizer.encode(prompt, return_tensors="pt")
     max_new_tokens = min(max_new_tokens, max(1, loaded.context_window - 1))
     prompt_budget = max(1, loaded.context_window - max_new_tokens)
@@ -142,7 +178,7 @@ def generate(
 
 
 def _render_prompt(tokenizer: object, messages: list[dict[str, str]]) -> str:
-    return "\n".join(message["content"] for message in messages)
+    return " ".join(message["content"] for message in messages)
     # try:
     #     return tokenizer.apply_chat_template(
     #         messages,
@@ -162,35 +198,35 @@ def _setting_command(
     *,
     current_temperature: float,
     current_top_k: int,
-) -> tuple[float, int, str]:
-    if command == "/temp":
-        if not argument:
+    current_top_p: float,
+) -> tuple[float, int, float, str]:
+    def try_parse(arg, num_type, default):
+        if not arg:
             return (
-                current_temperature,
-                current_top_k,
-                f"temperature={current_temperature:g}",
+                default,
+                f"usage: /{command} {num_type}",
             )
         try:
-            value = float(argument)
+            value = num_type(arg)
+            return value, f"{command}={value:g}"
         except ValueError:
-            return current_temperature, current_top_k, "usage: /temp NUMBER"
-        if value <= 0:
-            return (
-                current_temperature,
-                current_top_k,
-                "temperature must be greater than 0",
-            )
-        return value, current_top_k, f"temperature={value:g}"
+            return (default, f"usage: /{command} {num_type}")
 
-    if not argument:
-        return current_temperature, current_top_k, f"top_k={current_top_k}"
-    try:
-        value = int(argument)
-    except ValueError:
-        return current_temperature, current_top_k, "usage: /topk INTEGER"
-    if value < 1:
-        return current_temperature, current_top_k, "top-k must be at least 1"
-    return current_temperature, value, f"top_k={value}"
+    if command == "/temp":
+        current_temperature, msg = try_parse(
+            arg=argument, num_type=float, default=current_temperature
+        )
+    elif command == "/topk":
+        current_top_k, msg = try_parse(
+            arg=argument, num_type=int, default=current_top_k
+        )
+    elif command == "/topp":
+        current_top_p, msg = try_parse(
+            arg=argument, num_type=float, default=current_top_p
+        )
+    else:
+        msg = "Unknown command"
+    return (current_temperature, current_top_k, current_top_p, msg)
 
 
 def run_chat(
@@ -206,12 +242,13 @@ def run_chat(
 
     mode = "dev" if dev else "full"
     output_fn(f"Chatting with {mode}/{tag}.")
-    output_fn("Commands: /new, /temp [NUMBER], /topk [INTEGER], /quit")
+    output_fn("Commands: /new, /temp [NUMBER], /topk [INTEGER], /topp [NUMBER] /quit")
 
     loaded: LoadedModel | None = None
     messages: list[dict[str, str]] = []
     temperature = DEFAULT_TEMPERATURE
     top_k = DEFAULT_TOP_K
+    top_p = DEFAULT_TOP_P
 
     while True:
         try:
@@ -232,12 +269,13 @@ def run_chat(
             messages.clear()
             output_fn("Started a new conversation.")
             continue
-        if command in {"/temp", "/topk"}:
-            temperature, top_k, status = _setting_command(
+        if command in {"/temp", "/topk", "/topp"}:
+            temperature, top_k, top_p, status = _setting_command(
                 command,
                 argument,
                 current_temperature=temperature,
                 current_top_k=top_k,
+                current_top_p=top_p,
             )
             output_fn(status)
             continue
@@ -267,6 +305,7 @@ def run_chat(
             prompt,
             temperature=temperature,
             top_k=top_k,
+            top_p=top_p,
         )
-        output_fn(f"model> {response}")
+        output_fn(f"\nmodel> {response}\n")
         messages.append({"role": "assistant", "content": response})
